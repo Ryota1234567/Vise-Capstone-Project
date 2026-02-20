@@ -1,0 +1,3 @@
+[submodule "Core-Engine-V2/Streamlit_Trade_TLH_Optimizer"]
+	path = Core-Engine-V2/Streamlit_Trade_TLH_Optimizer
+	url = https://github.com/jringler30/Streamlit_Trade_TLH_Optimizer.git
