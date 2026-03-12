@@ -1,0 +1,1037 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tax Alpha Calculator</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0f1a;
+    --surface: #111827;
+    --surface2: #1a2236;
+    --border: #1f2f4a;
+    --accent: #00d4a8;
+    --accent2: #3b82f6;
+    --accent3: #f59e0b;
+    --text: #e8edf5;
+    --text-muted: #6b7fa3;
+    --text-dim: #3d4f70;
+    --positive: #00d4a8;
+    --negative: #f87171;
+    --gold: #f59e0b;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(ellipse 80% 50% at 10% 20%, rgba(0,212,168,0.05) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at 90% 80%, rgba(59,130,246,0.06) 0%, transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Header */
+  header {
+    padding: 40px 0 32px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 48px;
+  }
+
+  .header-inner {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+  }
+
+  .logo-area {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .logo-icon {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+  }
+
+  .logo-text {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
+  h1 {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(28px, 4vw, 44px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    background: linear-gradient(135deg, var(--text) 40%, var(--accent));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 15px;
+    font-weight: 300;
+    max-width: 520px;
+    margin-top: 8px;
+  }
+
+  .badge {
+    background: rgba(0,212,168,0.1);
+    border: 1px solid rgba(0,212,168,0.25);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 4px 12px;
+    border-radius: 20px;
+    white-space: nowrap;
+  }
+
+  /* Main Layout */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 420px 1fr;
+    gap: 28px;
+    align-items: start;
+  }
+
+  /* Input Panel */
+  .input-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    position: sticky;
+    top: 24px;
+  }
+
+  .panel-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 28px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .panel-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .form-group {
+    margin-bottom: 24px;
+  }
+
+  .form-label {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+
+  .form-label span:first-child {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  .form-label .value-display {
+    font-family: 'DM Mono', monospace;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--accent);
+    background: rgba(0,212,168,0.08);
+    padding: 2px 10px;
+    border-radius: 6px;
+  }
+
+  .hint {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 6px;
+    line-height: 1.5;
+  }
+
+  /* Slider */
+  .slider-wrap {
+    position: relative;
+  }
+
+  input[type="range"] {
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    outline: none;
+    border: none;
+    -webkit-appearance: none;
+    appearance: none;
+    cursor: pointer;
+    background: var(--border);
+    position: relative;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 3px solid var(--bg);
+    box-shadow: 0 0 0 2px var(--accent);
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+    box-shadow: 0 0 0 4px rgba(0,212,168,0.2);
+  }
+
+  input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 3px solid var(--bg);
+  }
+
+  .slider-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: 'DM Mono', monospace;
+  }
+
+  /* Select */
+  select {
+    width: 100%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    padding: 10px 14px;
+    outline: none;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7fa3' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    transition: border-color 0.2s;
+  }
+
+  select:focus { border-color: var(--accent); }
+
+  /* Number input */
+  .input-with-prefix {
+    display: flex;
+    align-items: center;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+
+  .input-with-prefix:focus-within { border-color: var(--accent); }
+
+  .input-prefix {
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.03);
+    border-right: 1px solid var(--border);
+    font-family: 'DM Mono', monospace;
+    font-size: 14px;
+    color: var(--text-muted);
+  }
+
+  .input-with-prefix input[type="number"] {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 14px;
+    padding: 10px 12px;
+    -moz-appearance: textfield;
+  }
+
+  .input-with-prefix input[type="number"]::-webkit-inner-spin-button,
+  .input-with-prefix input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 28px 0;
+  }
+
+  .calc-btn {
+    width: 100%;
+    padding: 14px;
+    background: linear-gradient(135deg, var(--accent), #00b894);
+    border: none;
+    border-radius: 10px;
+    color: #000;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.05em;
+    transition: opacity 0.2s, transform 0.15s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .calc-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+  .calc-btn:active { transform: translateY(0); }
+
+  /* Results Panel */
+  .results-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* Big metric cards */
+  .metrics-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 22px 20px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s;
+  }
+
+  .metric-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+
+  .metric-card.green::before { background: linear-gradient(90deg, var(--accent), transparent); }
+  .metric-card.blue::before { background: linear-gradient(90deg, var(--accent2), transparent); }
+  .metric-card.gold::before { background: linear-gradient(90deg, var(--gold), transparent); }
+
+  .metric-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+  }
+
+  .metric-value {
+    font-family: 'Playfair Display', serif;
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1;
+    margin-bottom: 6px;
+  }
+
+  .metric-card.green .metric-value { color: var(--accent); }
+  .metric-card.blue .metric-value { color: var(--accent2); }
+  .metric-card.gold .metric-value { color: var(--gold); }
+
+  .metric-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  /* Chart card */
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+  }
+
+  .chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+  }
+
+  .chart-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .chart-legend {
+    display: flex;
+    gap: 16px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  /* Bar chart */
+  .bar-chart {
+    position: relative;
+    height: 200px;
+  }
+
+  .bar-grid {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    pointer-events: none;
+  }
+
+  .bar-grid-line {
+    width: 100%;
+    height: 1px;
+    background: var(--border);
+    opacity: 0.5;
+    position: relative;
+  }
+
+  .bar-grid-line span {
+    position: absolute;
+    left: -40px;
+    top: -8px;
+    font-size: 10px;
+    font-family: 'DM Mono', monospace;
+    color: var(--text-dim);
+  }
+
+  .bars-container {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    padding-left: 40px;
+    padding-right: 8px;
+  }
+
+  .bar-group {
+    flex: 1;
+    display: flex;
+    gap: 3px;
+    align-items: flex-end;
+    height: 100%;
+    position: relative;
+  }
+
+  .bar {
+    flex: 1;
+    border-radius: 4px 4px 0 0;
+    transition: height 0.8s cubic-bezier(0.34, 1.2, 0.64, 1);
+    cursor: pointer;
+    position: relative;
+  }
+
+  .bar:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 10px;
+    font-family: 'DM Mono', monospace;
+    padding: 4px 8px;
+    border-radius: 5px;
+    white-space: nowrap;
+    z-index: 10;
+  }
+
+  .bar.without { background: linear-gradient(180deg, rgba(107,127,163,0.6), rgba(107,127,163,0.2)); }
+  .bar.with { background: linear-gradient(180deg, var(--accent), rgba(0,212,168,0.4)); }
+
+  .bar-label {
+    position: absolute;
+    bottom: -22px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: 'DM Mono', monospace;
+    white-space: nowrap;
+  }
+
+  /* Breakdown table */
+  .breakdown-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+  }
+
+  .breakdown-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 20px;
+  }
+
+  .breakdown-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .breakdown-row:last-child { border-bottom: none; }
+
+  .breakdown-row-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .breakdown-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .breakdown-values {
+    display: flex;
+    gap: 28px;
+    align-items: center;
+  }
+
+  .breakdown-val {
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    color: var(--text);
+    min-width: 90px;
+    text-align: right;
+  }
+
+  .breakdown-val.highlight {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .breakdown-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 0 0 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .breakdown-header-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  .breakdown-header-vals {
+    display: flex;
+    gap: 28px;
+  }
+
+  .breakdown-header-val {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    min-width: 90px;
+    text-align: right;
+  }
+
+  /* Assumptions note */
+  .note-card {
+    background: rgba(0,212,168,0.04);
+    border: 1px solid rgba(0,212,168,0.15);
+    border-radius: 12px;
+    padding: 16px 20px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.7;
+  }
+
+  .note-card strong {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  /* Animate on load */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .results-panel > * {
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .results-panel > *:nth-child(1) { animation-delay: 0.05s; }
+  .results-panel > *:nth-child(2) { animation-delay: 0.12s; }
+  .results-panel > *:nth-child(3) { animation-delay: 0.2s; }
+  .results-panel > *:nth-child(4) { animation-delay: 0.28s; }
+
+  @media (max-width: 900px) {
+    .main-grid { grid-template-columns: 1fr; }
+    .input-panel { position: static; }
+    .metrics-row { grid-template-columns: 1fr 1fr; }
+    .header-inner { flex-direction: column; align-items: flex-start; }
+  }
+
+  @media (max-width: 560px) {
+    .metrics-row { grid-template-columns: 1fr; }
+    .breakdown-values { gap: 12px; }
+  }
+
+  .progress-bar-wrap {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    margin-top: 6px;
+    overflow: hidden;
+  }
+
+  .progress-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.8s cubic-bezier(0.34, 1.2, 0.64, 1);
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <div class="logo-area">
+      <div class="logo-icon">◈</div>
+      <span class="logo-text">Tax Intelligence Suite</span>
+    </div>
+    <div class="header-inner">
+      <div>
+        <h1>Tax Alpha Calculator</h1>
+        <p class="subtitle">Estimate the potential after-tax value added by daily tax-loss harvesting through direct indexing.</p>
+      </div>
+      <span class="badge">Research Tool</span>
+    </div>
+  </header>
+
+  <div class="main-grid">
+    <!-- Input Panel -->
+    <div class="input-panel">
+      <div class="panel-title">Client Parameters</div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Initial Portfolio Value</span>
+        </div>
+        <div class="input-with-prefix">
+          <span class="input-prefix">$</span>
+          <input type="number" id="portfolioValue" value="1000000" min="10000" max="50000000" step="10000">
+        </div>
+        <p class="hint">Taxable equity assets eligible for direct indexing & TLH</p>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Annual Contribution</span>
+        </div>
+        <div class="input-with-prefix">
+          <span class="input-prefix">$</span>
+          <input type="number" id="annualContrib" value="50000" min="0" max="5000000" step="5000">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Investment Horizon</span>
+          <span class="value-display" id="horizonDisplay">15 yrs</span>
+        </div>
+        <div class="slider-wrap">
+          <input type="range" id="horizon" min="1" max="30" value="15">
+          <div class="slider-labels"><span>1 yr</span><span>15 yrs</span><span>30 yrs</span></div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Harvest (Short-Term) Tax Rate</span>
+          <span class="value-display" id="stRateDisplay">37%</span>
+        </div>
+        <div class="slider-wrap">
+          <input type="range" id="stRate" min="10" max="50" value="37">
+          <div class="slider-labels"><span>10%</span><span>30%</span><span>50%</span></div>
+        </div>
+        <p class="hint">Ordinary income / short-term capital gains rate</p>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Liquidation (Long-Term) Tax Rate</span>
+          <span class="value-display" id="ltRateDisplay">20%</span>
+        </div>
+        <div class="slider-wrap">
+          <input type="range" id="ltRate" min="0" max="37" value="20">
+          <div class="slider-labels"><span>0%</span><span>15%</span><span>37%</span></div>
+        </div>
+        <p class="hint">Long-term capital gains rate at liquidation</p>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Expected Annual Return</span>
+          <span class="value-display" id="returnDisplay">7.0%</span>
+        </div>
+        <div class="slider-wrap">
+          <input type="range" id="annualReturn" min="2" max="15" value="7" step="0.5">
+          <div class="slider-labels"><span>2%</span><span>7%</span><span>15%</span></div>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Portfolio Granularity</span>
+        </div>
+        <select id="granularity">
+          <option value="100">~100 securities (Concentrated)</option>
+          <option value="250">~250 securities (Moderate)</option>
+          <option value="400" selected>~400 securities (Standard DI)</option>
+          <option value="750">~750 securities (Broad)</option>
+          <option value="1000">~1,000 securities (Full Index)</option>
+        </select>
+        <p class="hint">More securities = more harvesting opportunities</p>
+      </div>
+
+      <div class="form-group">
+        <div class="form-label">
+          <span>Harvest Frequency</span>
+        </div>
+        <select id="frequency">
+          <option value="0.6">Monthly scanning</option>
+          <option value="0.8">Weekly scanning</option>
+          <option value="1.0" selected>Daily scanning</option>
+        </select>
+      </div>
+
+      <div class="divider"></div>
+
+      <button class="calc-btn" onclick="calculate()">
+        ▶ Calculate Tax Alpha
+      </button>
+    </div>
+
+    <!-- Results Panel -->
+    <div class="results-panel" id="resultsPanel">
+
+      <!-- Key Metrics -->
+      <div class="metrics-row">
+        <div class="metric-card green">
+          <div class="metric-label">Estimated TLH Alpha</div>
+          <div class="metric-value" id="tlhAlpha">—</div>
+          <div class="metric-sub">Annual after-tax excess return</div>
+        </div>
+        <div class="metric-card blue">
+          <div class="metric-label">Added Portfolio Value</div>
+          <div class="metric-value" id="addedValue">—</div>
+          <div class="metric-sub" id="addedValueSub">vs. non-TLH portfolio</div>
+        </div>
+        <div class="metric-card gold">
+          <div class="metric-label">Total Tax Deferred</div>
+          <div class="metric-value" id="totalDeferred">—</div>
+          <div class="metric-sub">Cumulative over horizon</div>
+        </div>
+      </div>
+
+      <!-- Bar Chart -->
+      <div class="chart-card">
+        <div class="chart-header">
+          <span class="chart-title">After-Tax Portfolio Value Over Time</span>
+          <div class="chart-legend">
+            <div class="legend-item"><div class="legend-dot" style="background:var(--text-muted)"></div>Without TLH</div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>With TLH</div>
+          </div>
+        </div>
+        <div class="bar-chart" id="barChart">
+          <div class="bar-grid" id="barGrid"></div>
+          <div class="bars-container" id="barsContainer"></div>
+        </div>
+      </div>
+
+      <!-- Breakdown -->
+      <div class="breakdown-card">
+        <div class="breakdown-title">Year-by-Year Breakdown</div>
+        <div class="breakdown-header">
+          <span class="breakdown-header-label">Year</span>
+          <div class="breakdown-header-vals">
+            <span class="breakdown-header-val">Without TLH</span>
+            <span class="breakdown-header-val">With TLH</span>
+            <span class="breakdown-header-val">Tax Alpha Gain</span>
+          </div>
+        </div>
+        <div id="breakdownRows"></div>
+      </div>
+
+      <!-- Assumptions Note -->
+      <div class="note-card">
+        <strong>Methodology:</strong> TLH alpha is modeled using a granularity multiplier (securities count), harvest frequency multiplier, and a base harvesting yield derived from short-term vs. long-term tax rate spread. The deferred tax is compounded as additional invested capital over the horizon. Final liquidation applies long-term capital gains tax. Results are <strong>estimates only</strong> and depend on market conditions, actual loss availability, reinvestment behavior, and individual tax circumstances. Not tax advice.
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  // Live update slider displays
+  document.getElementById('horizon').addEventListener('input', e => {
+    document.getElementById('horizonDisplay').textContent = e.target.value + ' yrs';
+  });
+  document.getElementById('stRate').addEventListener('input', e => {
+    document.getElementById('stRateDisplay').textContent = e.target.value + '%';
+  });
+  document.getElementById('ltRate').addEventListener('input', e => {
+    document.getElementById('ltRateDisplay').textContent = e.target.value + '%';
+  });
+  document.getElementById('annualReturn').addEventListener('input', e => {
+    document.getElementById('returnDisplay').textContent = parseFloat(e.target.value).toFixed(1) + '%';
+  });
+
+  function fmt(n, decimals = 0) {
+    if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+    if (Math.abs(n) >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+    return '$' + n.toFixed(decimals);
+  }
+
+  function calculate() {
+    const P = parseFloat(document.getElementById('portfolioValue').value) || 1000000;
+    const C = parseFloat(document.getElementById('annualContrib').value) || 0;
+    const T = parseInt(document.getElementById('horizon').value);
+    const stRate = parseFloat(document.getElementById('stRate').value) / 100;
+    const ltRate = parseFloat(document.getElementById('ltRate').value) / 100;
+    const r = parseFloat(document.getElementById('annualReturn').value) / 100;
+    const G = parseInt(document.getElementById('granularity').value);
+    const freq = parseFloat(document.getElementById('frequency').value);
+
+    // Base harvesting yield: empirically ~0.5%–2% depending on granularity & frequency
+    // Modeled from Vanguard research (0.47%–1.27% range)
+    const granMult = (G - 100) / 900; // 0 to 1 scale
+    const baseHarvYield = (0.005 + granMult * 0.015) * freq; // 0.5% to 2%
+    const rateDiff = Math.max(0, stRate - ltRate);
+    const annualTaxAlpha = baseHarvYield * rateDiff;
+
+    // Simulate year by year
+    const withoutTLH = [];
+    const withTLH = [];
+    let portWithout = P;
+    let portWith = P;
+    let totalDeferred = 0;
+    const taxAlphaBoost = 1 + annualTaxAlpha;
+
+    for (let y = 1; y <= T; y++) {
+      portWithout = portWithout * (1 + r) + C;
+      portWith = portWith * (1 + r) * taxAlphaBoost + C;
+      const deferred = portWith - portWithout;
+      totalDeferred += Math.max(0, portWith * baseHarvYield * stRate);
+      withoutTLH.push(portWithout);
+      withTLH.push(portWith);
+    }
+
+    const finalWithout = withoutTLH[T - 1];
+    const finalWith = withTLH[T - 1];
+
+    // After-tax liquidation
+    const atFinalWithout = finalWithout - (finalWithout - P) * ltRate;
+    const atFinalWith = finalWith - (finalWith - P) * ltRate;
+    const addedVal = atFinalWith - atFinalWithout;
+
+    // Display metrics
+    document.getElementById('tlhAlpha').textContent = (annualTaxAlpha * 100).toFixed(2) + '%';
+    document.getElementById('addedValue').textContent = fmt(addedVal);
+    document.getElementById('addedValueSub').textContent = `After ${T}-yr liquidation`;
+    document.getElementById('totalDeferred').textContent = fmt(totalDeferred);
+
+    // Bar chart
+    renderBarChart(withoutTLH, withTLH, T);
+
+    // Breakdown table
+    renderBreakdown(withoutTLH, withTLH, T);
+  }
+
+  function renderBarChart(without, withArr, T) {
+    const grid = document.getElementById('barGrid');
+    const bars = document.getElementById('barsContainer');
+    grid.innerHTML = '';
+    bars.innerHTML = '';
+
+    // Pick years to show (up to 8 bars)
+    const step = Math.max(1, Math.floor(T / 8));
+    const years = [];
+    for (let y = step; y <= T; y += step) years.push(y);
+    if (years[years.length - 1] !== T) years.push(T);
+
+    const maxVal = Math.max(...withArr);
+
+    // Grid lines
+    const levels = 4;
+    for (let i = 0; i <= levels; i++) {
+      const line = document.createElement('div');
+      line.className = 'bar-grid-line';
+      const val = maxVal * (1 - i / levels);
+      line.innerHTML = `<span>${fmt(val)}</span>`;
+      grid.appendChild(line);
+    }
+
+    // Bars
+    years.forEach(y => {
+      const idx = y - 1;
+      const group = document.createElement('div');
+      group.className = 'bar-group';
+
+      const b1 = document.createElement('div');
+      b1.className = 'bar without';
+      const h1 = (without[idx] / maxVal) * 100;
+      b1.style.height = '0%';
+      b1.setAttribute('data-tip', fmt(without[idx]));
+      setTimeout(() => b1.style.height = h1 + '%', 50);
+
+      const b2 = document.createElement('div');
+      b2.className = 'bar with';
+      const h2 = (withArr[idx] / maxVal) * 100;
+      b2.style.height = '0%';
+      b2.setAttribute('data-tip', fmt(withArr[idx]));
+      setTimeout(() => b2.style.height = h2 + '%', 50);
+
+      const lbl = document.createElement('div');
+      lbl.className = 'bar-label';
+      lbl.textContent = 'Yr ' + y;
+
+      group.appendChild(b1);
+      group.appendChild(b2);
+      group.appendChild(lbl);
+      bars.appendChild(group);
+    });
+  }
+
+  function renderBreakdown(without, withArr, T) {
+    const container = document.getElementById('breakdownRows');
+    container.innerHTML = '';
+
+    // Show select years
+    const step = Math.max(1, Math.ceil(T / 8));
+    const years = [];
+    for (let y = step; y <= T; y += step) years.push(y);
+    if (years[years.length - 1] !== T) years.push(T);
+
+    years.forEach(y => {
+      const idx = y - 1;
+      const diff = withArr[idx] - without[idx];
+      const pct = ((withArr[idx] / without[idx] - 1) * 100).toFixed(1);
+
+      const row = document.createElement('div');
+      row.className = 'breakdown-row';
+      row.innerHTML = `
+        <div class="breakdown-row-label">
+          <div class="breakdown-dot" style="background: ${y === T ? 'var(--accent)' : 'var(--text-dim)'}"></div>
+          Year ${y}
+        </div>
+        <div class="breakdown-values">
+          <span class="breakdown-val">${fmt(without[idx])}</span>
+          <span class="breakdown-val">${fmt(withArr[idx])}</span>
+          <span class="breakdown-val highlight">+${fmt(diff)} <span style="font-size:10px;color:var(--accent);opacity:0.7">(+${pct}%)</span></span>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  // Run on load with defaults
+  window.addEventListener('load', calculate);
+
+  // Auto-recalculate on any input change
+  document.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('change', calculate);
+    if (el.type === 'range') el.addEventListener('input', calculate);
+  });
+</script>
+
+</body>
+</html>
