@@ -1,0 +1,844 @@
+"""
+optimizer_msba_v1_engine.py
+===========================
+Tax-aware portfolio accounting engine with tax-loss harvesting (MSBA v1).
+
+Public API:
+    run_optimizer_simulation(...)  →  dict with nav_series, trades, gains, tax_paid
+
+Adapted from portfolio_accounting_engine_v2.2.ipynb.
+All logic is self-contained — no modifications to the Streamlit host required
+beyond importing this module and calling the public function.
+"""
+
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple, Optional, Literal
+import warnings
+
+warnings.filterwarnings("ignore")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Schema constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOT_COLUMNS = [
+    "lot_id", "ticker", "open_date", "shares",
+    "cost_basis", "total_cost", "source",
+]
+
+TRADE_COLUMNS = [
+    "trade_id", "trade_date", "ticker", "action",
+    "shares", "price", "gross_value", "exec_cost", "net_cash_impact", "reason",
+]
+
+REALIZED_COLUMNS = [
+    "event_id", "event_date", "ticker", "event_type",
+    "shares", "proceeds", "cost_basis", "gain_loss",
+    "holding_days", "gain_type", "tax_rate", "tax_owed", "lot_id", "reason",
+]
+
+PROXY_COLUMNS = ["symbol", "lookup_type", "lookup_symbol", "order"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tax Engine
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TaxEngine:
+    """
+    ST/LT capital gains tax engine with:
+    - year-aware accounting
+    - loss carry-forward
+    - up-to-$3,000 ordinary income offset per year (treated at st_rate)
+    - incremental tax settlement (tax/refund applied immediately to cash)
+
+    Notes:
+    - This is a simplified implementation meant for simulation/backtesting.
+    - It supports negative incremental tax (refund) when YTD liability decreases.
+    """
+
+    def __init__(self, st_rate: float, lt_rate: float, lt_holding_days: int = 365):
+        self.st_rate = st_rate
+        self.lt_rate = lt_rate
+        self.lt_days = lt_holding_days
+        self.st_loss_cf: float = 0.0
+        self.lt_loss_cf: float = 0.0
+
+        # Year state
+        self._year: Optional[int] = None
+        self._st_total: float = 0.0
+        self._lt_total: float = 0.0
+        self._ordinary_offset_used: float = 0.0
+        self._ytd_liability: float = 0.0
+
+    def classify(self, open_date, close_date) -> Tuple[str, float]:
+        days = (close_date - open_date).days
+        if days >= self.lt_days:
+            return "LT", self.lt_rate
+        return "ST", self.st_rate
+
+    def _reset_year(self, year: int):
+        self._year = year
+        self._st_total = 0.0
+        self._lt_total = 0.0
+        self._ordinary_offset_used = 0.0
+        self._ytd_liability = 0.0
+
+    def _compute_ytd_liability(self) -> Tuple[float, float, float]:
+        """
+        Compute current-year cumulative tax liability given:
+        - realized totals (st/lt)
+        - carryforwards (st/lt)
+        - netting and $3k ordinary offset cap
+
+        Returns: (liability, ordinary_offset_used, carryforward_excess_loss)
+        """
+        st = float(self._st_total)
+        lt = float(self._lt_total)
+        st_cf = float(self.st_loss_cf)
+        lt_cf = float(self.lt_loss_cf)
+
+        # Apply carryforward losses to same-type gains first, then cross-type.
+        if st > 0 and st_cf > 0:
+            used = min(st, st_cf)
+            st -= used
+            st_cf -= used
+        if lt > 0 and lt_cf > 0:
+            used = min(lt, lt_cf)
+            lt -= used
+            lt_cf -= used
+        if st > 0 and lt_cf > 0:
+            used = min(st, lt_cf)
+            st -= used
+            lt_cf -= used
+        if lt > 0 and st_cf > 0:
+            used = min(lt, st_cf)
+            lt -= used
+            st_cf -= used
+
+        # Net ST vs LT within the year (simplified).
+        if st > 0 and lt < 0:
+            off = min(st, -lt)
+            st -= off
+            lt += off
+        elif lt > 0 and st < 0:
+            off = min(lt, -st)
+            lt -= off
+            st += off
+
+        taxable_st = max(0.0, st)
+        taxable_lt = max(0.0, lt)
+        net = st + lt
+
+        ordinary_offset = 0.0
+        if net < 0:
+            ordinary_offset = min(3000.0, -net)
+        carryforward_excess = max(0.0, -net - ordinary_offset)
+
+        liability = taxable_st * self.st_rate + taxable_lt * self.lt_rate - ordinary_offset * self.st_rate
+        liability = float(liability)
+        return liability, ordinary_offset, carryforward_excess
+
+    def step(self, date, gain: float, gain_type: str, *, count_for_tax: bool = True) -> float:
+        """
+        Apply a realized gain/loss to the current-year tax ledger and return
+        the incremental tax amount (positive=tax owed, negative=refund).
+
+        If count_for_tax=False, the event is ignored for tax purposes (used for
+        the tax-alpha shadow counterfactual).
+        """
+        year = pd.Timestamp(date).year
+        if self._year is None:
+            self._reset_year(year)
+        elif year != self._year:
+            # Roll remaining excess loss into carryforward at year boundary
+            _, _, excess_loss = self._compute_ytd_liability()
+            if excess_loss > 0:
+                # Keep simple: carry forward as ST loss
+                self.st_loss_cf += excess_loss
+            self._reset_year(year)
+
+        prev_liab = self._ytd_liability
+
+        if count_for_tax and abs(gain) > 1e-12:
+            if gain_type == "ST":
+                self._st_total += gain
+            else:
+                self._lt_total += gain
+
+        liab, ordinary_offset, excess_loss = self._compute_ytd_liability()
+        self._ordinary_offset_used = ordinary_offset
+        self._ytd_liability = liab
+
+        # At all times, enforce that excess loss beyond (gains + 3000) remains as carryforward
+        # rather than creating additional refunds.
+        if excess_loss > 0:
+            # represent as carryforward bucket (ST for simplicity)
+            # but do not double-count: only hold in carryforward implicitly at year-end.
+            pass
+
+        return float(self._ytd_liability - prev_liab)
+
+    @property
+    def ordinary_offset_used_ytd(self) -> float:
+        return float(self._ordinary_offset_used)
+
+    @property
+    def current_year(self) -> Optional[int]:
+        return self._year
+
+
+class ProxyResolver:
+    """Resolve original symbols to proxy alternatives in priority order."""
+
+    def __init__(self, proxy_df: Optional[pd.DataFrame]):
+        self._map: Dict[str, List[str]] = {}
+        if proxy_df is None or proxy_df.empty:
+            return
+        df = proxy_df.copy()
+        missing = [c for c in PROXY_COLUMNS if c not in df.columns]
+        if missing:
+            raise ValueError(f"proxy_df missing columns: {missing}")
+        df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
+        df["lookup_symbol"] = df["lookup_symbol"].astype(str).str.strip().str.upper()
+        df["order"] = pd.to_numeric(df["order"], errors="coerce").astype("Int64")
+        df = df.dropna(subset=["symbol", "lookup_symbol", "order"]).copy()
+        df = df.sort_values(["symbol", "order", "lookup_symbol"])
+        for sym, g in df.groupby("symbol", sort=False):
+            self._map[sym] = g["lookup_symbol"].tolist()
+
+    def proxies_for(self, symbol: str) -> List[str]:
+        return self._map.get(str(symbol).strip().upper(), [])
+
+    def sleeve_all_tickers(self, symbol: str) -> List[str]:
+        sym = str(symbol).strip().upper()
+        return [sym] + self.proxies_for(sym)
+
+
+class WashSaleTracker:
+    """Tracks last TLH loss-harvest date per original symbol."""
+
+    def __init__(self, wash_sale_days: int = 30):
+        self.wash_sale_days = int(wash_sale_days)
+        self._last: Dict[str, pd.Timestamp] = {}
+
+    def record_tlh_loss_sale(self, symbol: str, date):
+        self._last[str(symbol).strip().upper()] = pd.Timestamp(date)
+
+    def is_buy_blocked(self, symbol: str, date) -> bool:
+        if self.wash_sale_days <= 0:
+            return False
+        sym = str(symbol).strip().upper()
+        last = self._last.get(sym)
+        if last is None:
+            return False
+        dt = pd.Timestamp(date)
+        return dt <= (last + pd.Timedelta(days=self.wash_sale_days))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default transaction cost configuration
+# commission_per_trade_bps: flat execution cost in bps of trade value
+# slippage_bps: market impact / price improvement slippage in bps
+# bid_ask_bps: half-spread cost in bps (round-trip is 2× for buys+sells)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_COST_CONFIG: Dict[str, float] = {
+    "commission_bps": 5.0,    # ~$0.005/share on a $100 stock = 5 bps
+    "slippage_bps": 5.0,      # 5 bps market impact
+    "bid_ask_bps": 2.0,       # 2 bps half-spread (one-way)
+}
+
+
+class Portfolio:
+    """Trade-driven portfolio with lot tracking, realized gain accounting, tax, and transaction costs."""
+
+    def __init__(self, initial_cash: float, tax_engine: TaxEngine,
+                 cost_config: Optional[Dict[str, float]] = None):
+        self.cash = initial_cash
+        self.tax = tax_engine
+
+        # Merge provided config with defaults so callers only need to override what they change
+        cfg = {**DEFAULT_COST_CONFIG, **(cost_config or {})}
+        self._cost_rate = (cfg["commission_bps"] + cfg["slippage_bps"] + cfg["bid_ask_bps"]) / 10_000.0
+
+        self._lot_ctr = 0
+        self._trd_ctr = 0
+        self._rel_ctr = 0
+
+        # Lots stored as list-of-dicts for speed (no repeated DataFrame rebuild)
+        self._lots: List[dict] = []
+        self._lots_idx: Dict[str, List[int]] = {}  # ticker → list of _lots indices
+        self._lot_id_map: Dict[str, int] = {}       # lot_id → index
+
+        self._trades: List[dict] = []
+        self._realized: List[dict] = []
+        self._taxes: List[dict] = []
+        self.total_tax_paid: float = 0.0
+        self.total_commission_and_slippage: float = 0.0  # cumulative execution costs
+        self.total_losses_harvested: float = 0.0          # absolute value of harvested losses
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _nid(self, prefix: str, counter_attr: str) -> str:
+        val = getattr(self, counter_attr) + 1
+        setattr(self, counter_attr, val)
+        return f"{prefix}{val:06d}"
+
+    def shares_held(self, ticker: str) -> float:
+        return sum(
+            self._lots[i]["shares"]
+            for i in self._lots_idx.get(ticker, [])
+            if self._lots[i]["shares"] > 1e-12
+        )
+
+    def _open_lots(self, ticker: str) -> List[dict]:
+        return [
+            self._lots[i]
+            for i in self._lots_idx.get(ticker, [])
+            if self._lots[i]["shares"] > 1e-12
+        ]
+
+    def _sorted_lots_for_sell(self, ticker: str, price: float, date) -> List[dict]:
+        """TAX_OPTIMAL ordering: losses first (biggest ST loss first), then smallest gains."""
+        lots = self._open_lots(ticker)
+        if not lots:
+            return lots
+        for lot in lots:
+            lot["_pnl"] = price - lot["cost_basis"]
+            lot["_days"] = (date - lot["open_date"]).days
+            lot["_is_loss"] = 1 if lot["_pnl"] < 0 else 0
+            lot["_is_lt"] = 1 if lot["_days"] >= self.tax.lt_days else 0
+        lots.sort(key=lambda x: (-x["_is_loss"], x["_is_lt"], x["_pnl"]))
+        return lots
+
+    # ── buy ───────────────────────────────────────────────────────────────────
+
+    def buy(self, date, ticker: str, shares: float, price: float, source: str = "BUY", reason: str = ""):
+        gross = shares * price
+        exec_cost = gross * self._cost_rate  # commission + slippage + bid-ask on buys
+        total_cash_needed = gross + exec_cost
+        if total_cash_needed > self.cash + 1e-6:
+            # Back-solve shares from available cash including execution cost
+            shares = self.cash / (price * (1 + self._cost_rate))
+            gross = shares * price
+            exec_cost = gross * self._cost_rate
+            total_cash_needed = gross + exec_cost
+        if shares < 1e-12:
+            return
+
+        self.cash -= total_cash_needed
+        self.total_commission_and_slippage += exec_cost
+
+        lid = self._nid("L", "_lot_ctr")
+        lot = {
+            "lot_id": lid, "ticker": ticker, "open_date": date,
+            "shares": shares, "cost_basis": price, "total_cost": gross, "source": source,
+        }
+        idx = len(self._lots)
+        self._lots.append(lot)
+        self._lots_idx.setdefault(ticker, []).append(idx)
+        self._lot_id_map[lid] = idx
+
+        self._trades.append({
+            "trade_id": self._nid("T", "_trd_ctr"), "trade_date": date,
+            "ticker": ticker, "action": source, "shares": shares,
+            "price": price, "gross_value": gross,
+            "exec_cost": round(exec_cost, 4), "net_cash_impact": -(gross + exec_cost),
+            "reason": reason,
+        })
+
+    # ── sell ──────────────────────────────────────────────────────────────────
+
+    def sell(self, date, ticker: str, shares: float, price: float, lot_selection: str = "TAX_OPTIMAL",
+             reason: str = "", *, tax_count_for_this_sale: Optional[callable] = None):
+        avail = self.shares_held(ticker)
+        if shares > avail + 1e-9:
+            shares = avail
+        if shares < 1e-12:
+            return
+
+        gross_proceeds = shares * price
+        exec_cost = gross_proceeds * self._cost_rate  # slippage + spread reduces net proceeds
+        net_proceeds = gross_proceeds - exec_cost
+        self.total_commission_and_slippage += exec_cost
+
+        if lot_selection == "TAX_OPTIMAL":
+            lots = self._sorted_lots_for_sell(ticker, price, date)
+        else:
+            lots = sorted(self._open_lots(ticker), key=lambda x: x["open_date"])
+
+        remaining = shares
+        for lot in lots:
+            if remaining < 1e-12:
+                break
+            sold = min(lot["shares"], remaining)
+            gain_type, tax_rate = self.tax.classify(lot["open_date"], date)
+            lot_proceeds = sold * price
+            lot_cost = sold * lot["cost_basis"]
+            gain = lot_proceeds - lot_cost
+            count_for_tax = True
+            if tax_count_for_this_sale is not None:
+                count_for_tax = bool(tax_count_for_this_sale(gain=gain, gain_type=gain_type))
+            tax = self.tax.step(date, gain, gain_type, count_for_tax=count_for_tax)
+
+            eid = self._nid("R", "_rel_ctr")
+            self._realized.append({
+                "event_id": eid, "event_date": date, "ticker": ticker,
+                "event_type": "SALE", "shares": sold, "proceeds": lot_proceeds,
+                "cost_basis": lot_cost, "gain_loss": gain,
+                "holding_days": (date - lot["open_date"]).days,
+                "gain_type": gain_type, "tax_rate": tax_rate,
+                "tax_owed": tax, "lot_id": lot["lot_id"], "reason": reason,
+            })
+            if abs(tax) > 1e-12:
+                self.cash -= tax
+                self.total_tax_paid += tax
+                self._taxes.append({"date": date, "event_id": eid, "amount": tax})
+            if gain < 0:
+                self.total_losses_harvested += abs(gain)
+
+            lot["shares"] -= sold
+            lot["total_cost"] = lot["shares"] * lot["cost_basis"]
+            remaining -= sold
+
+        self.cash += net_proceeds  # net of execution costs
+
+        self._trades.append({
+            "trade_id": self._nid("T", "_trd_ctr"), "trade_date": date,
+            "ticker": ticker, "action": "SELL", "shares": shares,
+            "price": price, "gross_value": gross_proceeds,
+            "exec_cost": round(exec_cost, 4), "net_cash_impact": net_proceeds,
+            "reason": reason,
+        })
+
+    # ── dividend ──────────────────────────────────────────────────────────────
+
+    def process_dividend(self, date, ticker: str, div_per_share: float,
+                         price: float, reinvest: bool):
+        held = self.shares_held(ticker)
+        if held < 1e-12:
+            return
+        gross = held * div_per_share
+        # No separate dividend tax in MSBA v1 — dividends treated as income
+        self.cash += gross
+
+        if reinvest and price > 0:
+            drip_shares = gross / price
+            self.buy(date, ticker, drip_shares, price, source="DRIP")
+
+    # ── valuation ─────────────────────────────────────────────────────────────
+
+    def market_value(self, prices: Dict[str, float]) -> float:
+        mv = 0.0
+        for lot in self._lots:
+            if lot["shares"] > 1e-12:
+                mv += lot["shares"] * prices.get(lot["ticker"], 0.0)
+        return mv
+
+    def nav(self, prices: Dict[str, float]) -> float:
+        return self.market_value(prices) + self.cash
+
+    # ── output accessors ──────────────────────────────────────────────────────
+
+    def trades_df(self) -> pd.DataFrame:
+        if not self._trades:
+            return pd.DataFrame(columns=TRADE_COLUMNS)
+        return pd.DataFrame(self._trades)
+
+    def realized_df(self) -> pd.DataFrame:
+        if not self._realized:
+            return pd.DataFrame(columns=REALIZED_COLUMNS)
+        return pd.DataFrame(self._realized)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Simulation Driver
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_rebalance_set(trading_dates, freq: str):
+    """Return set of dates on which to rebalance."""
+    dates = pd.DatetimeIndex(trading_dates)
+    if len(dates) < 2 or freq == "None":
+        return set()
+    if freq == "Daily":
+        return set(dates[1:])
+    rebal = set()
+    prev_m, prev_y = dates[0].month, dates[0].year
+    prev_w = dates[0].isocalendar()[1]
+    for dt in dates[1:]:
+        if freq == "Weekly":
+            w = dt.isocalendar()[1]
+            if w != prev_w or dt.year != prev_y:
+                rebal.add(dt)
+                prev_w = w; prev_y = dt.year
+        elif freq == "Monthly":
+            if dt.month != prev_m or dt.year != prev_y:
+                rebal.add(dt)
+                prev_m = dt.month; prev_y = dt.year
+        elif freq == "Quarterly":
+            if dt.month in {1, 4, 7, 10} and (dt.month != prev_m or dt.year != prev_y):
+                rebal.add(dt)
+            if dt.month != prev_m or dt.year != prev_y:
+                prev_m = dt.month; prev_y = dt.year
+    return rebal
+
+
+def run_optimizer_simulation(
+    prices_df: pd.DataFrame,
+    dividends_df: Optional[pd.DataFrame],
+    tickers: List[str],
+    weights: List[float],
+    start_date,
+    end_date,
+    rebalance_frequency: str,
+    tax_rates: Dict[str, float],
+    tlh_threshold: float,
+    reinvest_dividends: bool,
+    initial_capital: float = 100_000.0,
+    price_field: str = "PRICECLOSE",
+    static: bool = False,
+    cost_config: Optional[Dict[str, float]] = None,
+    proxy_df: Optional[pd.DataFrame] = None,
+    wash_sale_days: int = 30,
+    tlh_threshold_mode: Literal["explicit", "rule_of_thumb"] = "explicit",
+    compute_tax_alpha: bool = True,
+) -> dict:
+    """
+    Run the MSBA v1 tax-aware portfolio simulation.
+
+    Parameters
+    ----------
+    prices_df          : long-format prices with TICKERSYMBOL, PRICEDATE, price_field
+    dividends_df       : dividend data with TICKERSYMBOL, PAYDATE, DIVAMOUNT (or None)
+    tickers            : list of ticker symbols
+    weights            : target weights (same order as tickers)
+    start_date/end_date: simulation window
+    rebalance_frequency: "Daily" | "Weekly" | "Monthly" | "Quarterly" | "None"
+    tax_rates          : {"st_rate": float, "lt_rate": float}
+    tlh_threshold      : e.g. 0.05 means harvest if lot is down ≥ 5%
+    reinvest_dividends : True → DRIP, False → keep as cash
+    initial_capital    : dollar amount
+    price_field        : column name for price in prices_df
+    static             : if True, no rebalancing (buy-and-hold with TLH only)
+
+    Returns
+    -------
+    dict with keys: nav_series, trades_df, realized_df, tax_paid_total
+    """
+    start_dt = pd.Timestamp(start_date)
+    end_dt = pd.Timestamp(end_date)
+
+    # Normalize tickers
+    tickers = [str(t).strip().upper() for t in tickers]
+
+    proxy_resolver = ProxyResolver(proxy_df)
+    wash_tracker = WashSaleTracker(wash_sale_days=wash_sale_days)
+
+    # Determine all tickers needed for pricing/valuation (originals + proxies)
+    all_needed = set(tickers)
+    for tk in tickers:
+        for ptk in proxy_resolver.proxies_for(tk):
+            all_needed.add(ptk)
+    all_needed_list = sorted(all_needed)
+
+    # Threshold rule-of-thumb if requested
+    if tlh_threshold_mode == "rule_of_thumb":
+        # Daily rule: 15%, Monthly rule: 10% (fallback: 10%)
+        if str(rebalance_frequency) == "Daily":
+            tlh_threshold = 0.15
+        elif str(rebalance_frequency) == "Monthly":
+            tlh_threshold = 0.10
+        else:
+            tlh_threshold = 0.10
+
+    # ── Build wide price matrix (once) ────────────────────────────────────────
+    mask = (
+        prices_df["TICKERSYMBOL"].isin(all_needed_list)
+        & (prices_df["PRICEDATE"] >= start_dt)
+        & (prices_df["PRICEDATE"] <= end_dt)
+    )
+    sub = prices_df.loc[mask, ["TICKERSYMBOL", "PRICEDATE", price_field]].copy()
+    sub = sub.drop_duplicates(subset=["TICKERSYMBOL", "PRICEDATE"])
+    wide = sub.pivot(index="PRICEDATE", columns="TICKERSYMBOL", values=price_field)
+    wide = wide.sort_index().ffill().bfill()
+
+    missing = [t for t in all_needed_list if t not in wide.columns]
+    if missing:
+        raise ValueError(f"Tickers missing from price data: {missing}")
+    wide = wide[all_needed_list]
+
+    trading_dates = wide.index.tolist()
+    if len(trading_dates) < 2:
+        raise ValueError("Not enough trading dates for simulation.")
+
+    # ── Pre-index dividends by (ticker, date) ─────────────────────────────────
+    div_lookup: Dict[Tuple[str, pd.Timestamp], float] = {}
+    if dividends_df is not None and not dividends_df.empty:
+        ddf = dividends_df.copy()
+        ddf["PAYDATE"] = pd.to_datetime(ddf["PAYDATE"], errors="coerce")
+        if "TICKERSYMBOL" in ddf.columns:
+            ddf["TICKERSYMBOL"] = ddf["TICKERSYMBOL"].astype(str).str.strip().str.upper()
+            ddf = ddf[ddf["TICKERSYMBOL"].isin(all_needed_list)]
+            for _, row in ddf.iterrows():
+                key = (row["TICKERSYMBOL"], row["PAYDATE"])
+                div_lookup[key] = div_lookup.get(key, 0.0) + float(row["DIVAMOUNT"])
+
+    # ── Rebalance schedule ────────────────────────────────────────────────────
+    if static:
+        rebal_dates = set()
+    else:
+        rebal_dates = _build_rebalance_set(trading_dates, rebalance_frequency)
+
+    # ── Initialize portfolio ──────────────────────────────────────────────────
+    tax_eng = TaxEngine(
+        st_rate=tax_rates.get("st_rate", 0.35),
+        lt_rate=tax_rates.get("lt_rate", 0.20),
+    )
+    pf = Portfolio(initial_capital, tax_eng, cost_config=cost_config)
+
+    weight_map = dict(zip(tickers, weights))
+
+    def _resolve_buy_symbol(original_symbol: str, date) -> str:
+        sym = str(original_symbol).strip().upper()
+        if not wash_tracker.is_buy_blocked(sym, date):
+            return sym
+        for alt in proxy_resolver.proxies_for(sym):
+            if alt in wide.columns:
+                return alt
+        return sym  # fallback (may be missing/blocked; caller should guard)
+
+    def _sleeve_value_and_holdings(original_symbol: str, prices_today: Dict[str, float]) -> Tuple[float, List[Tuple[str, float]]]:
+        """Return (total_value, [(ticker, shares_held)...]) for original + proxies."""
+        total = 0.0
+        held: List[Tuple[str, float]] = []
+        for tk in proxy_resolver.sleeve_all_tickers(original_symbol):
+            sh = pf.shares_held(tk)
+            if sh > 1e-12:
+                held.append((tk, sh))
+                total += sh * prices_today.get(tk, 0.0)
+        return total, held
+
+    # ── Day 0: initial purchases ──────────────────────────────────────────────
+    day0 = trading_dates[0]
+    for tk in tickers:
+        alloc = initial_capital * weight_map[tk]
+        buy_tk = _resolve_buy_symbol(tk, day0)
+        price = wide.loc[day0, buy_tk]
+        shares = alloc / price
+        pf.buy(day0, buy_tk, shares, price, reason=f"INIT:{tk}")
+
+    # ── Pre-allocate NAV array ────────────────────────────────────────────────
+    n_days = len(trading_dates)
+    nav_arr = np.empty(n_days, dtype=np.float64)
+
+    # Record day 0 NAV
+    prices_d0 = {tk: float(wide.loc[day0, tk]) for tk in all_needed_list}
+    nav_arr[0] = pf.nav(prices_d0)
+
+    # ── Daily loop ────────────────────────────────────────────────────────────
+    for i in range(1, n_days):
+        dt = trading_dates[i]
+        prices_today = {tk: float(wide.loc[dt, tk]) for tk in all_needed_list}
+
+        # 1. Dividends
+        for tk in all_needed_list:
+            div_amt = div_lookup.get((tk, dt))
+            if div_amt is not None and div_amt > 0:
+                pf.process_dividend(dt, tk, div_amt, prices_today.get(tk, 0.0), reinvest_dividends)
+
+        # 2. Tax-Loss Harvesting — check each lot
+        if tlh_threshold > 0:
+            for tk in tickers:
+                lots_to_harvest = []
+                # Harvest only original ticker lots (not proxies)
+                for lot in pf._open_lots(tk):
+                    if lot["shares"] < 1e-12:
+                        continue
+                    px = prices_today.get(tk, 0.0)
+                    if px <= 0:
+                        continue
+                    unrealized_pct = (px - lot["cost_basis"]) / lot["cost_basis"]
+                    if unrealized_pct <= -tlh_threshold:
+                        lots_to_harvest.append((lot["lot_id"], lot["shares"]))
+
+                for lot_id, lot_shares in lots_to_harvest:
+                    # Sell the lot (TLH-triggered)
+                    px = prices_today[tk]
+                    pf.sell(
+                        dt, tk, lot_shares, px, lot_selection="TAX_OPTIMAL",
+                        reason=f"TLH_SELL:{tk}",
+                    )
+                    # Record wash sale window (block buys of original for next 30 days)
+                    wash_tracker.record_tlh_loss_sale(tk, dt)
+                    # Rebuy using proxy if original is blocked; skip if no valid proxy available
+                    rebuy_tk = _resolve_buy_symbol(tk, dt)
+                    rebuy_px = prices_today.get(rebuy_tk, 0.0)
+                    if rebuy_tk == tk and wash_tracker.is_buy_blocked(tk, dt):
+                        pass  # No valid proxy found; skip rebuy to avoid wash-sale violation
+                    elif rebuy_px > 0:
+                        pf.buy(dt, rebuy_tk, lot_shares, rebuy_px, source="TLH_REBUY", reason=f"TLH_REBUY_FOR:{tk}")
+
+        # 3. Rebalancing
+        if dt in rebal_dates:
+            total_val = pf.nav(prices_today)
+            if total_val > 0:
+                # Sell overweight positions first
+                for tk in tickers:
+                    current_val, held = _sleeve_value_and_holdings(tk, prices_today)
+                    target_val = total_val * weight_map[tk]
+                    if current_val > target_val + 1.0:  # sell excess
+                        dollars_to_sell = current_val - target_val
+                        # Sell from lowest priority held tickers first (proxies first), keep original if possible
+                        sleeve = proxy_resolver.sleeve_all_tickers(tk)
+                        priority = {sym: idx for idx, sym in enumerate(sleeve)}
+                        held_sorted = sorted(held, key=lambda x: priority.get(x[0], 10_000), reverse=True)
+                        for held_tk, held_sh in held_sorted:
+                            if dollars_to_sell <= 1.0:
+                                break
+                            px = prices_today.get(held_tk, 0.0)
+                            if px <= 0:
+                                continue
+                            sh_to_sell = min(held_sh, dollars_to_sell / px)
+                            pf.sell(dt, held_tk, sh_to_sell, px, lot_selection="TAX_OPTIMAL", reason=f"REBAL_SELL_FOR:{tk}")
+                            dollars_to_sell -= sh_to_sell * px
+
+                # Recalculate NAV after sells (cash increased)
+                total_val = pf.nav(prices_today)
+
+                # Buy underweight positions
+                for tk in tickers:
+                    current_val, _ = _sleeve_value_and_holdings(tk, prices_today)
+                    target_val = total_val * weight_map[tk]
+                    if target_val > current_val + 1.0:
+                        buy_sym = _resolve_buy_symbol(tk, dt)
+                        px = prices_today.get(buy_sym, 0.0)
+                        if px > 0:
+                            buy_shares = (target_val - current_val) / px
+                            pf.buy(dt, buy_sym, buy_shares, px, reason=f"REBAL_BUY_FOR:{tk}")
+
+        # 4. Record NAV
+        nav_arr[i] = pf.nav(prices_today)
+
+    # ── Build output ──────────────────────────────────────────────────────────
+    nav_series = pd.Series(nav_arr, index=trading_dates, name="NAV")
+    nav_series.index.name = "PRICEDATE"
+
+    cfg = {**DEFAULT_COST_CONFIG, **(cost_config or {})}
+    out = {
+        "nav_series": nav_series,
+        "trades_df": pf.trades_df(),
+        "realized_df": pf.realized_df(),
+        "tax_paid_total": pf.total_tax_paid,
+        "losses_harvested": round(pf.total_losses_harvested, 2),
+        "transaction_costs_total": round(pf.total_commission_and_slippage, 2),
+        "cost_config": cfg,
+        "ordinary_income_offset_used_ytd_final": pf.tax.ordinary_offset_used_ytd,
+        "loss_carryforward_st": float(pf.tax.st_loss_cf),
+        "loss_carryforward_lt": float(pf.tax.lt_loss_cf),
+    }
+
+    # ── Tax Alpha computations ────────────────────────────────────────────────
+    if compute_tax_alpha:
+        # Strategy 2: no TLH trades baseline
+        base = run_optimizer_simulation(
+            prices_df=prices_df,
+            dividends_df=dividends_df,
+            tickers=tickers,
+            weights=weights,
+            start_date=start_date,
+            end_date=end_date,
+            rebalance_frequency=rebalance_frequency,
+            tax_rates=tax_rates,
+            tlh_threshold=0.0,
+            reinvest_dividends=reinvest_dividends,
+            initial_capital=initial_capital,
+            price_field=price_field,
+            static=static,
+            cost_config=cost_config,
+            proxy_df=proxy_df,
+            wash_sale_days=wash_sale_days,
+            tlh_threshold_mode="explicit",
+            compute_tax_alpha=False,
+        )
+        nav_no_tlh = base["nav_series"].reindex(nav_series.index).ffill()
+        tax_alpha_2 = nav_series - nav_no_tlh
+
+        # Strategy 1: shadow tax engine ignoring TLH loss realization benefit
+        # Re-run simulation but with tax engine that ignores TLH loss events for tax purposes
+        tax_eng_shadow = TaxEngine(
+            st_rate=tax_rates.get("st_rate", 0.35),
+            lt_rate=tax_rates.get("lt_rate", 0.20),
+        )
+        pf_shadow = Portfolio(initial_capital, tax_eng_shadow, cost_config=cost_config)
+
+        # Replay the exact trade log from primary run on shadow portfolio
+        tdf = pf.trades_df()
+        # Ensure chronological order
+        if not tdf.empty:
+            tdf2 = tdf.sort_values(["trade_date", "trade_id"]).copy()
+        else:
+            tdf2 = tdf
+
+        # For pricing, use the same wide matrix
+        nav_shadow_arr = np.empty(n_days, dtype=np.float64)
+        nav_shadow_arr[0] = pf_shadow.nav(prices_d0)
+
+        trade_iter = iter(tdf2.itertuples(index=False))
+        cur_trade = next(trade_iter, None)
+
+        # Apply day-0 trades to shadow portfolio (loop starts at i=1, so must handle day 0 separately)
+        _day0_ts = pd.Timestamp(trading_dates[0])
+        while cur_trade is not None and pd.Timestamp(cur_trade.trade_date) == _day0_ts:
+            _action = str(cur_trade.action)
+            _tk = str(cur_trade.ticker)
+            _sh = float(cur_trade.shares)
+            _px = float(cur_trade.price)
+            _reason = getattr(cur_trade, "reason", "")
+            if _action == "SELL":
+                def _count_d0(gain, gain_type, _r=_reason):
+                    return not ("TLH_SELL" in _r and gain < 0)
+                pf_shadow.sell(_day0_ts, _tk, _sh, _px, reason=_reason, tax_count_for_this_sale=_count_d0)
+            else:
+                pf_shadow.buy(_day0_ts, _tk, _sh, _px, source=_action, reason=_reason)
+            cur_trade = next(trade_iter, None)
+        nav_shadow_arr[0] = pf_shadow.nav(prices_d0)
+
+        for i in range(1, n_days):
+            dt = trading_dates[i]
+            # Apply all trades for this date
+            while cur_trade is not None and pd.Timestamp(cur_trade.trade_date) == pd.Timestamp(dt):
+                action = str(cur_trade.action)
+                tk = str(cur_trade.ticker)
+                sh = float(cur_trade.shares)
+                px = float(cur_trade.price)
+                reason = getattr(cur_trade, "reason", "")
+
+                if action == "SELL":
+                    def _make_tax_counter(r):
+                        def _count(gain: float, gain_type: str) -> bool:
+                            return not ("TLH_SELL" in r and gain < 0)
+                        return _count
+                    pf_shadow.sell(dt, tk, sh, px, lot_selection="TAX_OPTIMAL", reason=reason, tax_count_for_this_sale=_make_tax_counter(reason))
+                else:
+                    pf_shadow.buy(dt, tk, sh, px, source=action, reason=reason)
+                cur_trade = next(trade_iter, None)
+
+            prices_today = {tk: float(wide.loc[dt, tk]) for tk in all_needed_list}
+            nav_shadow_arr[i] = pf_shadow.nav(prices_today)
+
+        nav_shadow = pd.Series(nav_shadow_arr, index=trading_dates, name="NAV_SHADOW")
+        nav_shadow.index.name = "PRICEDATE"
+        tax_alpha_1 = nav_series - nav_shadow.reindex(nav_series.index).ffill()
+
+        out.update({
+            "nav_no_tlh": nav_no_tlh,
+            "nav_tlh_no_realization_benefit": nav_shadow.reindex(nav_series.index).ffill(),
+            "tax_alpha_1_series": tax_alpha_1,
+            "tax_alpha_2_series": tax_alpha_2,
+            "tax_alpha_1_final": float(tax_alpha_1.iloc[-1]),
+            "tax_alpha_2_final": float(tax_alpha_2.iloc[-1]),
+        })
+
+    return out
